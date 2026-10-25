@@ -100,7 +100,7 @@ export default function Home() {
     } catch {}
   }, []);
 
-  // While a job runs, check its progress every 3 seconds
+    // While a job runs, check its progress every 3 seconds
   useEffect(() => {
     if (!jobId || !running) return;
     let stop = false;
@@ -112,7 +112,16 @@ export default function Home() {
           setMessage("");
         }
       } catch (e) {
-        if (!stop) setMessage(e instanceof Error ? e.message : "Lost connection to the worker.");
+        if (stop) return;
+        if (e instanceof WorkerError && e.status === 404) {
+          forget("cwv.job");
+          setJob(null);
+          setMessage(
+            "The worker was restarted and this job is gone. URLs already written are in the sheet. Start the job again to finish the rest."
+          );
+        } else {
+          setMessage(e instanceof Error ? e.message : "Lost connection to the worker.");
+        }
       }
     };
     const t = setInterval(tick, 3000);
