@@ -1,11 +1,12 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   cancelJob,
   getHealth,
   getJob,
+  markItem,
   startJob,
-  WorkerError,
+  WORKER_API_VERSION,
   type DeviceResult,
   type Health,
   type Job,
@@ -13,6 +14,13 @@ import {
   type Mode,
   type Rating,
 } from "@/lib/worker";
+import { readSheet, writeItem } from "@/lib/sheetApi";
+
+// Where your friends get the worker. Replace with your real repo address.
+const WORKER_REPO_URL = "https://github.com/sudhersun/cvw-worker.git";
+const REPO_DIR = WORKER_REPO_URL.split("/").pop()?.replace(/\.git$/, "") ?? "cwv-worker";
+
+type WState = { ok: boolean; error: string | null };
 
 const COLOR = {
   green: "text-green-400",
@@ -59,11 +67,28 @@ function DeviceCell({
   );
 }
 
-function StatusCell({ item, cancelled }: { item: JobItem; cancelled: boolean }) {
-  if (item.writeError) {
-    return <span className="text-red-400">Sheet write failed: {item.writeError}</span>;
+function StatusCell({
+  item,
+  w,
+  cancelled,
+  onRetry,
+}: {
+  item: JobItem;
+  w: WState | null;
+  cancelled: boolean;
+  onRetry: () => void;
+}) {
+  if (w && !w.ok) {
+    return (
+      <span className="text-red-400">
+        Sheet write failed: {w.error}{" "}
+        <button onClick={onRetry} className="ml-1 underline">
+          Retry
+        </button>
+      </span>
+    );
   }
-  if (item.written) return <span className="text-green-400">Written to sheet</span>;
+  if (w?.ok) return <span className="text-green-400">Written to sheet</span>;
   if (item.status === "error") {
     return <span className="text-red-400">{item.errors[0] ?? "Failed"}</span>;
   }
@@ -78,14 +103,27 @@ export default function Home() {
   const [runCount, setRunCount] = useState(3);
   const [job, setJob] = useState<Job | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
+  const [worker, setWorker] = useState<"checking" | "ok" | "missing" | "outdated">("checking");
   const [starting, setStarting] = useState(false);
   const [message, setMessage] = useState("");
+  const [local, setLocal] = useState<Record<string, WState>>({});
+  const handled = useRef<Set<string>>(new Set());
 
   const validLink = SHEET_RE.test(link);
   const jobId = job?.id;
   const running = job?.status === "running";
 
-  // Load saved settings, and pick up the last job if it is still known to the worker
+  async function checkWorker() {
+    setWorker("checking");
+    try {
+      const h = await getHealth();
+      setWorker((h.apiVersion ?? 1) >= WORKER_API_VERSION ? "ok" : "outdated");
+    } catch {
+      setWorker("missing");
+    }
+  }
+
+  // Load saved settings, check the worker, and pick up the last job if the worker still knows it
   useEffect(() => {
     try {
       setLink(localStorage.getItem("cwv.link") ?? "");
@@ -98,9 +136,12 @@ export default function Home() {
           .catch(() => forget("cwv.job"));
       }
     } catch {}
+    getHealth()
+      .then((h) => setWorker((h.apiVersion ?? 1) >= WORKER_API_VERSION ? "ok" : "outdated"))
+      .catch(() => setWorker("missing"));
   }, []);
 
-    // While a job runs, check its progress every 3 seconds
+  // While a job runs, check its progress every 3 seconds
   useEffect(() => {
     if (!jobId || !running) return;
     let stop = false;
@@ -113,7 +154,7 @@ export default function Home() {
         }
       } catch (e) {
         if (stop) return;
-        if (e instanceof WorkerError && e.status === 404) {
+        if (e instanceof Error && "status" in e && (e as { status: number }).status === 404) {
           forget("cwv.job");
           setJob(null);
           setMessage(
@@ -131,7 +172,7 @@ export default function Home() {
     };
   }, [jobId, running]);
 
-  // ...and how busy the server is every 5 seconds
+  // ...and how busy the worker is every 5 seconds
   useEffect(() => {
     if (!running) return;
     let stop = false;
@@ -149,21 +190,77 @@ export default function Home() {
     };
   }, [running]);
 
-  async function start(mode: Mode, overwrite = false) {
+  // Write each finished URL into the sheet (also catches up after a page reload)
+  useEffect(() => {
+    if (!job) return;
+    const sheetUrl = job.meta?.sheetUrl;
+    if (!sheetUrl) return;
+    job.items.forEach((it, idx) => {
+      const key = `${job.id}:${idx}`;
+      if (it.status !== "done" || it.written !== null || handled.current.has(key)) return;
+      handled.current.add(key);
+      (async () => {
+        let ok = true;
+        let err: string | null = null;
+        try {
+          await writeItem(sheetUrl, job.mode, it);
+        } catch (e) {
+          ok = false;
+          err = e instanceof Error ? e.message : "Write failed";
+        }
+        setLocal((p) => ({ ...p, [key]: { ok, error: err } }));
+        markItem(job.id, idx, ok, err ?? undefined).catch(() => {});
+      })();
+    });
+  }, [job]);
+
+  const wstate = (idx: number): WState | null => {
+    if (!job) return null;
+    const l = local[`${job.id}:${idx}`];
+    if (l) return l;
+    const it = job.items[idx];
+    if (it.written === true) return { ok: true, error: null };
+    if (it.written === false) return { ok: false, error: it.writeError ?? "Write failed" };
+    return null;
+  };
+
+  function retryWrite(idx: number) {
+    if (!job) return;
+    const key = `${job.id}:${idx}`;
+    handled.current.delete(key);
+    setLocal((p) => {
+      const c = { ...p };
+      delete c[key];
+      return c;
+    });
+    markItem(job.id, idx, null).catch(() => {});
+    setJob({
+      ...job,
+      items: job.items.map((x, i) => (i === idx ? { ...x, written: null, writeError: null } : x)),
+    });
+  }
+
+  async function start(mode: Mode) {
     setMessage("");
     setStarting(true);
     try {
-      const { id } = await startJob({ sheetUrl: link, mode, runs: runCount, overwrite });
+      const sheet = await readSheet(link, mode);
+      if (
+        sheet.filled &&
+        !window.confirm(`The ${mode.toUpperCase()} columns already have values. Overwrite them?`)
+      ) {
+        return;
+      }
+      const { id } = await startJob({
+        items: sheet.items,
+        mode,
+        runs: runCount,
+        meta: { sheetUrl: link },
+      });
       save("cwv.job", id);
       setJob(await getJob(id));
     } catch (e) {
-      if (e instanceof WorkerError && e.code === "FILLED") {
-        if (window.confirm(`The ${mode.toUpperCase()} columns already have values. Overwrite them?`)) {
-          await start(mode, true);
-        }
-      } else {
-        setMessage(e instanceof Error ? e.message : "Could not start the job.");
-      }
+      setMessage(e instanceof Error ? e.message : "Could not start the job.");
     } finally {
       setStarting(false);
     }
@@ -179,17 +276,44 @@ export default function Home() {
     }
   }
 
-  const written = job?.items.filter((i) => i.written).length ?? 0;
+  const written = job ? job.items.filter((_, i) => wstate(i)?.ok).length : 0;
   const pct = job && job.progress.total ? (job.progress.finished / job.progress.total) * 100 : 0;
   const busy = starting || running;
+  const canRun = validLink && !busy && worker === "ok";
 
   return (
     <main className="w-full px-4 py-8 md:px-[120px]">
       <h1 className="text-2xl font-semibold">CWV Automation</h1>
       <p className="mt-1 text-sm text-gray-400">
-        Paste the client's Google Sheet link, then run Before or After. Tests run on the official
-        PageSpeed Insights page.
+        Paste the client's Google Sheet link, then run Before or After. The tests run on your own
+        computer, on the official PageSpeed Insights page.
       </p>
+
+      {worker !== "ok" && worker !== "checking" && (
+        <div className="mt-6 rounded-lg border border-orange-500 p-4 text-sm">
+          <p className="font-semibold text-orange-400">
+            {worker === "outdated"
+              ? "Your worker is out of date"
+              : "The worker is not running on this computer"}
+          </p>
+          <p className="mt-1 text-gray-400">
+            The tests run on your own computer, in your own Chrome. Install Node.js (LTS), Git and
+            Google Chrome, then in a terminal:
+          </p>
+          <pre className="mt-2 overflow-auto rounded bg-[#222] p-3 text-xs text-gray-200">
+            {worker === "outdated"
+              ? `cd ${REPO_DIR}\ngit pull\nnpm install\nnpm start`
+              : `git clone ${WORKER_REPO_URL}\ncd ${REPO_DIR}\nnpm install\nnpm start`}
+          </pre>
+          <p className="mt-2 text-gray-400">
+            Keep that window open. If Chrome asks to allow access to devices on your local network,
+            click Allow. Then:
+          </p>
+          <button onClick={checkWorker} className="mt-2 rounded-lg border px-4 py-1.5">
+            Check again
+          </button>
+        </div>
+      )}
 
       <input
         value={link}
@@ -226,14 +350,14 @@ export default function Home() {
         </label>
         <button
           onClick={() => start("before")}
-          disabled={!validLink || busy}
+          disabled={!canRun}
           className="rounded-lg bg-orange-600 px-5 py-2 text-white disabled:opacity-40"
         >
           Run Before
         </button>
         <button
           onClick={() => start("after")}
-          disabled={!validLink || busy}
+          disabled={!canRun}
           className="rounded-lg bg-green-600 px-5 py-2 text-white disabled:opacity-40"
         >
           Run After
@@ -248,6 +372,7 @@ export default function Home() {
             Open sheet
           </a>
         )}
+        {worker === "ok" && <span className="text-xs text-green-400">Worker connected</span>}
       </div>
 
       {message && <p className="mt-4 text-sm text-red-400">{message}</p>}
@@ -258,7 +383,7 @@ export default function Home() {
             <b>{job.mode === "before" ? "Before" : "After"}</b> ·{" "}
             {job.status === "running" && `${job.progress.finished} / ${job.progress.total} tests finished`}
             {job.status === "done" && `Finished. ${written} of ${job.items.length} URLs written to the sheet.`}
-            {job.status === "cancelled" && `Cancelled. ${written} URLs were written before stopping.`}
+            {job.status === "cancelled" && `Cancelled. ${written} URLs were written.`}
           </p>
 
           {running && (
@@ -267,12 +392,12 @@ export default function Home() {
                 <div className="h-full bg-green-500 transition-all" style={{ width: `${pct}%` }} />
               </div>
               <p className="mt-2 text-gray-500">
-                You can close this page. The job keeps running, and this page picks it up when you
-                come back in the same browser.
+                Keep the worker window open. You can close this page: results are written to the
+                sheet when you come back to it.
               </p>
               {health && (
                 <p className="mt-1 text-gray-500">
-                  Server: {health.active} of {health.maxSessions} browser windows busy,{" "}
+                  Worker: {health.active} of {health.maxSessions} browser windows busy,{" "}
                   {health.queuedTasks} tests waiting.
                   {health.pausedForSeconds > 0 &&
                     ` Google asked for a check, tests are paused for ${health.pausedForSeconds}s.`}
@@ -292,8 +417,8 @@ export default function Home() {
               </tr>
             </thead>
             <tbody>
-              {job.items.map((it) => (
-                <tr key={it.url} className="border-b align-top">
+              {job.items.map((it, idx) => (
+                <tr key={`${it.url}-${idx}`} className="border-b align-top">
                   <td className="max-w-[260px] truncate py-2 pr-4">{it.url}</td>
                   <td className="pr-4">
                     {it.runsDone + it.failed}/{job.runs}
@@ -302,7 +427,12 @@ export default function Home() {
                   <DeviceCell all={it.scores.mobile} picked={it.result?.mobile} />
                   <DeviceCell all={it.scores.desktop} picked={it.result?.desktop} />
                   <td className="py-2">
-                    <StatusCell item={it} cancelled={job.status === "cancelled"} />
+                    <StatusCell
+                      item={it}
+                      w={wstate(idx)}
+                      cancelled={job.status === "cancelled"}
+                      onRetry={() => retryWrite(idx)}
+                    />
                   </td>
                 </tr>
               ))}

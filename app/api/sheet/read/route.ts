@@ -1,15 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSheets, parseSheetUrl } from "@/lib/sheets";
-import { mapHeaders, parseRows } from "@/lib/mapping";
+import { mapHeaders, parseRows, type Phase } from "@/lib/mapping";
 
 export async function POST(req: NextRequest) {
-  const { sheetUrl } = await req.json();
-  const { id, gid } = parseSheetUrl(sheetUrl ?? "");
+  const body = await req.json().catch(() => null);
+  const mode = body?.mode as Phase;
+  const { id, gid } = parseSheetUrl(String(body?.sheetUrl ?? ""));
   if (!id) {
-    return NextResponse.json(
-      { error: "That doesn't look like a Google Sheet link." },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "That doesn't look like a Google Sheet link." }, { status: 400 });
+  }
+  if (mode !== "before" && mode !== "after") {
+    return NextResponse.json({ error: "Bad request." }, { status: 400 });
   }
 
   try {
@@ -28,25 +29,39 @@ export async function POST(req: NextRequest) {
       range: `'${tabTitle.replace(/'/g, "''")}'!A:AZ`,
     });
     const values = (res.data.values ?? []) as string[][];
-    const headers = (values[0] ?? []).map(String);
-    const mapping = mapHeaders(headers);
+    const mapping = mapHeaders((values[0] ?? []).map(String));
     const rows = parseRows(values, mapping);
-        const isFilled = (col: number | undefined) =>
-      col !== undefined &&
-      rows.some((r) => String(values[r.rowNumber - 1]?.[col] ?? "").trim() !== "");
 
-    const filled = {
-      before: isFilled(mapping.metrics.before.score),
-      after: isFilled(mapping.metrics.after.score),
-    };
+    if (!rows.length) {
+      return NextResponse.json({ error: "No Mobile/Desktop rows found in the sheet." }, { status: 400 });
+    }
+    const cols = mapping.metrics[mode];
+    if (!Object.keys(cols).length) {
+      return NextResponse.json({ error: `No '${mode}' metric columns found in the sheet.` }, { status: 400 });
+    }
 
-       return NextResponse.json({
+    // One item per URL, with the sheet row of its Mobile and Desktop line
+    const groups = new Map<number, { url: string; rows: { mobile?: number; desktop?: number } }>();
+    for (const r of rows) {
+      const g = groups.get(r.group) ?? { url: r.url, rows: {} };
+      g.rows[r.device] = r.rowNumber;
+      groups.set(r.group, g);
+    }
+    const items = [...groups.values()];
+    if (items.length > 20) {
+      return NextResponse.json({ error: "Too many URLs (max 20)." }, { status: 400 });
+    }
+
+    const scoreCol = cols.score;
+    const filled =
+      scoreCol !== undefined &&
+      rows.some((r) => String(values[r.rowNumber - 1]?.[scoreCol] ?? "").trim() !== "");
+
+    return NextResponse.json({
+      items,
+      filled,
       spreadsheetTitle: meta.data.properties?.title ?? "",
       tabTitle,
-      headers,
-      mapping,
-      rows,
-      filled,
     });
   } catch (e) {
     const code = (e as { code?: number }).code;
