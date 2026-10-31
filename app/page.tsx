@@ -420,9 +420,12 @@ export default function Home() {
               {job.items.map((it, idx) => (
                 <tr key={`${it.url}-${idx}`} className="border-b align-top">
                   <td className="max-w-[260px] truncate py-2 pr-4">{it.url}</td>
-                  <td className="pr-4">
+                                    <td className="pr-4">
                     {it.runsDone + it.failed}/{job.runs}
                     {it.failed > 0 && ` (${it.failed} failed)`}
+                    {it.result?.pickedRun ? (
+                      <div className="text-gray-500">one link: run {it.result.pickedRun}</div>
+                    ) : null}
                   </td>
                   <DeviceCell all={it.scores.mobile} picked={it.result?.mobile} />
                   <DeviceCell all={it.scores.desktop} picked={it.result?.desktop} />

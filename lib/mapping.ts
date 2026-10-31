@@ -56,27 +56,42 @@ export function mapHeaders(headers: string[]): Mapping {
     link: { before: null, after: null },
     screenshot: { before: null, after: null },
   };
-  let lastLinkPhase: Phase | null = null;
+  // The metric of the Before column on the left, used when a header is only "After"
+  let lastMetric: MetricKey | null = null;
 
   headers.forEach((raw, i) => {
-    const h = String(raw ?? "").trim().toLowerCase();
-    if (!h) return;
+    const text = String(raw ?? "").trim().toLowerCase();
+    if (!text) return;
 
-    if (h === "page url" || h === "url") {
+    const isAfter = /\bafter\b/.test(text);
+    const phase: Phase = isAfter ? "after" : "before";
+    // The header without the words Before/After and without punctuation: "After LCP" -> "lcp"
+    const name = text
+      .replace(/\b(after|before)\b/g, " ")
+      .replace(/[^a-z0-9 ]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (text === "page url" || text === "url") {
       m.urlCol = i;
-    } else if (h === "device") {
-      m.deviceCol = i;
-    } else if (h.includes("reference link")) {
-      const ph: Phase = h.startsWith("after") ? "after" : "before";
-      m.link[ph] = i;
-      lastLinkPhase = ph;
-    } else if (h.includes("screenshot")) {
-      if (lastLinkPhase) m.screenshot[lastLinkPhase] = i; // belongs to the link before it
-    } else {
-      const ph: Phase = h.startsWith("after ") ? "after" : "before";
-      const key = METRIC_NAMES[h.replace(/^after\s+/, "")];
-      if (key) m.metrics[ph][key] = i;
+      return;
     }
+    if (text === "device") {
+      m.deviceCol = i;
+      return;
+    }
+    if (text.includes("screenshot")) return; // filled by hand, never touched
+    if (text.includes("reference link")) {
+      m.link[phase] = i;
+      return;
+    }
+
+    let key: MetricKey | undefined = METRIC_NAMES[name] ?? METRIC_NAMES[name.split(" ")[0]];
+    if (!key && isAfter && name === "" && lastMetric) key = lastMetric;
+    if (!key) return;
+
+    m.metrics[phase][key] = i;
+    if (!isAfter) lastMetric = key;
   });
   return m;
 }

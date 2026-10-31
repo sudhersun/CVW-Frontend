@@ -1,6 +1,6 @@
 export const WORKER_URL = process.env.NEXT_PUBLIC_WORKER_URL ?? "http://localhost:4000";
 // The page needs a worker with at least this API version
-export const WORKER_API_VERSION = 2;
+export const WORKER_API_VERSION = 3;
 
 export type Mode = "before" | "after";
 export type Rating = "green" | "orange" | "red" | null;
@@ -22,7 +22,7 @@ export type JobItem = {
   failed: number;
   scores: { mobile: (number | null)[]; desktop: (number | null)[] };
   errors: string[];
-  result: { mobile: DeviceResult | null; desktop: DeviceResult | null } | null;
+  result: { mobile: DeviceResult | null; desktop: DeviceResult | null; pickedRun?: number } | null;
   written: boolean | null;
   writeError: string | null;
 };
