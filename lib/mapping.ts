@@ -1,10 +1,10 @@
-export type MetricKey = "score" | "fcp" | "lcp" | "cls" | "si" | "tbt" | "tti" | "inp";
+export type MetricKey = string;
 export type Phase = "before" | "after";
 
 export type Mapping = {
   urlCol: number | null;
   deviceCol: number | null;
-  metrics: Record<Phase, Partial<Record<MetricKey, number>>>;
+  metrics: Record<Phase, Record<string, number>>;
   link: Record<Phase, number | null>;
   screenshot: Record<Phase, number | null>;
 };
@@ -16,25 +16,20 @@ export type SheetRow = {
   group: number; // rows with the same group belong to the same URL block
 };
 
-// Header names we recognise (lowercase). Add more here if a client uses other names.
-const METRIC_NAMES: Record<string, MetricKey> = {
+// Short names -> the report's label (letters and digits only). Add more here if needed.
+// Any other header is matched directly against the report's label, e.g. "Best Practices" -> "bestpractices".
+const ALIASES: Record<string, string> = {
   score: "score",
   performance: "score",
-  "performance score": "score",
-  fcp: "fcp",
-  "first contentful paint": "fcp",
-  lcp: "lcp",
-  "largest contentful paint": "lcp",
-  cls: "cls",
-  "cumulative layout shift": "cls",
-  si: "si",
-  "speed index": "si",
-  tbt: "tbt",
-  "total blocking time": "tbt",
-  tti: "tti",
-  "time to interactive": "tti",
-  inp: "inp",
-  "interaction to next paint": "inp",
+  performancescore: "score",
+  fcp: "firstcontentfulpaint",
+  lcp: "largestcontentfulpaint",
+  cls: "cumulativelayoutshift",
+  si: "speedindex",
+  tbt: "totalblockingtime",
+  tti: "timetointeractive",
+  inp: "interactiontonextpaint",
+  bestpractice: "bestpractices",
 };
 
 export function colLetter(i: number): string {
@@ -56,8 +51,7 @@ export function mapHeaders(headers: string[]): Mapping {
     link: { before: null, after: null },
     screenshot: { before: null, after: null },
   };
-  // The metric of the Before column on the left, used when a header is only "After"
-  let lastMetric: MetricKey | null = null;
+  let lastKey: string | null = null; // used when a header is only "After"
 
   headers.forEach((raw, i) => {
     const text = String(raw ?? "").trim().toLowerCase();
@@ -65,12 +59,9 @@ export function mapHeaders(headers: string[]): Mapping {
 
     const isAfter = /\bafter\b/.test(text);
     const phase: Phase = isAfter ? "after" : "before";
-    // The header without the words Before/After and without punctuation: "After LCP" -> "lcp"
     const name = text
       .replace(/\b(after|before)\b/g, " ")
-      .replace(/[^a-z0-9 ]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+      .replace(/[^a-z0-9]/g, "");
 
     if (text === "page url" || text === "url") {
       m.urlCol = i;
@@ -80,18 +71,18 @@ export function mapHeaders(headers: string[]): Mapping {
       m.deviceCol = i;
       return;
     }
-    if (text.includes("screenshot")) return; // filled by hand, never touched
+    if (text.includes("screenshot")) return; // never touched
     if (text.includes("reference link")) {
       m.link[phase] = i;
       return;
     }
 
-    let key: MetricKey | undefined = METRIC_NAMES[name] ?? METRIC_NAMES[name.split(" ")[0]];
-    if (!key && isAfter && name === "" && lastMetric) key = lastMetric;
+    let key: string | null = name ? ALIASES[name] ?? name : null;
+    if (!key && isAfter && lastKey) key = lastKey;
     if (!key) return;
 
     m.metrics[phase][key] = i;
-    if (!isAfter) lastMetric = key;
+    if (!isAfter) lastKey = key;
   });
   return m;
 }

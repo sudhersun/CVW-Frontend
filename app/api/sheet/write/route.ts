@@ -13,6 +13,7 @@ type DeviceResult = {
   score: number;
   metrics: Record<(typeof KEYS)[number], { display: string | null; rating: Rating }>;
   link: string;
+  values: Record<string, { display: string | null; num: number | null; rating: Rating }>;
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -39,7 +40,20 @@ function cleanResult(x: unknown): DeviceResult | null {
     if (!isRating(r)) return null;
     metrics[k] = { display: (d as string | null | undefined) ?? null, rating: r };
   }
-  return { score, metrics, link };
+
+  const values: DeviceResult["values"] = {};
+  const vin = o.values;
+  if (vin && typeof vin === "object") {
+    for (const [k, raw] of Object.entries(vin as Record<string, unknown>).slice(0, 60)) {
+      const v = raw as { display?: unknown; num?: unknown; rating?: unknown } | null;
+      if (!v || k.length > 60) continue;
+      const display = typeof v.display === "string" && v.display.length <= 20 ? v.display : null;
+      const num = typeof v.num === "number" && Number.isFinite(v.num) ? v.num : null;
+      if (display === null && num === null) continue;
+      values[k] = { display, num, rating: isRating(v.rating) ? v.rating : null };
+    }
+  }
+  return { score, metrics, link, values };
 }
 
 function rgb(hex: string) {
@@ -163,15 +177,23 @@ export async function POST(req: NextRequest) {
       if (!result || typeof rowNumber !== "number" || valid.get(rowNumber) !== device) continue;
       const r = rowNumber - 1;
 
-      if (cols.score !== undefined) {
-        requests.push(valueCell(tabId, r, cols.score, { numberValue: result.score }, scoreRating(result.score)));
+      for (const [key, col] of Object.entries(cols) as [string, number][]) {
+        if (key === "score") {
+          requests.push(valueCell(tabId, r, col, { numberValue: result.score }, scoreRating(result.score)));
+          continue;
+        }
+        const v = result.values[key];
+        if (!v) {
+          // PageSpeed has no value for these in a normal run, so write a dash
+          if (key === "interactiontonextpaint" || key === "timetointeractive") {
+            requests.push(valueCell(tabId, r, col, { stringValue: "-" }, null));
+          }
+          continue;
+        }
+        const cell = v.num !== null ? { numberValue: v.num } : { stringValue: v.display ?? "-" };
+        requests.push(valueCell(tabId, r, col, cell, v.rating));
       }
-      for (const k of KEYS) {
-        const col = cols[k];
-        const m = result.metrics[k];
-        if (col === undefined || m.display === null) continue;
-        requests.push(valueCell(tabId, r, col, { stringValue: m.display }, m.rating));
-      }
+
       if (linkCol !== null) requests.push(linkCell(tabId, r, linkCol, result.link));
     }
 

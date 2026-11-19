@@ -1,6 +1,6 @@
 export const WORKER_URL = process.env.NEXT_PUBLIC_WORKER_URL ?? "http://localhost:4000";
 // The page needs a worker with at least this API version
-export const WORKER_API_VERSION = 3;
+export const WORKER_API_VERSION = 4;
 
 export type Mode = "before" | "after";
 export type Rating = "green" | "orange" | "red" | null;
@@ -12,6 +12,7 @@ export type DeviceResult = {
   metrics: { fcp: Metric; lcp: Metric; cls: Metric; si: Metric; tbt: Metric };
   link: string;
   testedAt: string;
+  values?: Record<string, { display: string | null; num: number | null; rating: Rating }>;
 };
 
 export type JobItem = {
